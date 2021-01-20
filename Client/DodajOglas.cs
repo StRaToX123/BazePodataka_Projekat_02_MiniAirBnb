@@ -15,7 +15,6 @@ namespace Client
 {
     public partial class DodajOglas : Form
     {
-        // private HubConnection _connection;
         public IHubProxy _hub;
 
         public Button _dodajOglasButton;
@@ -27,22 +26,6 @@ namespace Client
 
         public DodajOglas()
         {
-            /*
-            string url = @"http://localhost:8080/";
-            _connection = new HubConnection(url);
-            _hub = _connection.CreateHubProxy("TestHub");
-            try
-            {
-                _connection.Start().Wait();
-            }
-            catch
-            {
-                MessageBox.Show("Server je offline :( \n pokusajte ponovo kasnije");
-                System.Environment.Exit(1);
-                return;
-            }
-            */
-
             InitializeComponent();
         }
 
@@ -116,8 +99,8 @@ namespace Client
             for (int i = 0; i < _imageAsByteArrayList.Count; i++)
             {
                 _hub.Invoke("ClientSaljeBlockSlike",
-                    i.ToString(), 
-                    _imageAsByteArrayList.Count.ToString(), 
+                    i.ToString(),
+                    _imageAsByteArrayList.Count.ToString(),
                     _imageAsByteArrayList[i]);
             }
 
@@ -151,12 +134,12 @@ namespace Client
             }
 
             // Sada jada je slika poslata, treba poslati i ostatak informacija o stanu
-            _hub.Invoke("DodajOglas", 
-                adresaTextBox.Text, 
-                checkBox1.Checked, 
-                checkBox2.Checked, 
-                checkBox3.Checked, 
-                checkBox4.Checked, 
+            _hub.Invoke("DodajOglas",
+                adresaTextBox.Text,
+                checkBox1.Checked,
+                checkBox2.Checked,
+                checkBox3.Checked,
+                checkBox4.Checked,
                 opisTextBox.Text,
                 datumi);
         }
@@ -182,6 +165,8 @@ namespace Client
                     Bitmap myBitmap = new Bitmap(openFileDialog1.FileNames[0]);
                     Image myThumbnail = myBitmap.GetThumbnailImage(300, 300,
                         myCallback, IntPtr.Zero);
+
+                    _imageAsByteArrayList.Clear();
 
                     byte[] imageByteArray = ConvertImageToByteArray(myBitmap, ".bmp");
                     int numberOfIterations = imageByteArray.Length / 30720;
@@ -256,7 +241,7 @@ namespace Client
                 return memoryStream.ToArray();
             }
         }
-    
+
 
         private void dataGridView1_CellClick(object sender, DataGridViewCellEventArgs e)
         {
@@ -270,7 +255,7 @@ namespace Client
                 newDateTimePicker = _datumiDo[e.RowIndex];
             }
 
-            
+
 
             Rectangle oRectangle = dataGridView1.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, true);
             newDateTimePicker.Size = new Size(oRectangle.Width, oRectangle.Height);
@@ -323,7 +308,7 @@ namespace Client
             {
                 dataGridView1.Rows[kojiDateTimePicker].Cells[doIliOd].Value = _datumiDo[kojiDateTimePicker].Text.ToString();
             }
-            
+
         }
 
         void DateTimePicker_CloseUp(object sender, EventArgs e)
@@ -332,6 +317,21 @@ namespace Client
             dtp.Visible = false;
         }
 
-        
+        private void opisTextBox_TextChanged(object sender, EventArgs e)
+        {
+            char[] SpecialChars = "@#$%^&".ToCharArray();
+            int indexOf = opisTextBox.Text.IndexOfAny(SpecialChars);
+            if (indexOf != -1)
+            {
+                opisTextBox.Text = opisTextBox.Text.Remove(opisTextBox.Text.Length - 1, 1);
+                opisTextBox.SelectionStart = opisTextBox.Text.Length;
+                opisTextBox.SelectionLength = 0;
+            }
+        }
+
+        private void opisTextBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            
+        }
     }
 }

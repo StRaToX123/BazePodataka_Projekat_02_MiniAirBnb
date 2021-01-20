@@ -11,6 +11,8 @@ using Cassandra;
 using Microsoft.AspNet.SignalR;
 using Microsoft.AspNet.SignalR.Hubs;
 using System.IO;
+using System.Drawing;
+using System.Reflection;
 
 namespace Server.SignalRServer
 {
@@ -56,6 +58,175 @@ namespace Server.SignalRServer
         public static ConcurrentDictionary<string, List<byte[]>> connectedUsersConnectionIDToImageBlockList = new ConcurrentDictionary<string, List<byte[]>>();
         public static ConcurrentDictionary<string, Oglas> connectedUsersConnectionIDToOglas = new ConcurrentDictionary<string, Oglas>();
 
+        // Radi isto sto i PostaviOglasi, samo sto je ta funkcija namenjena za klijente dok je ovo verzija te iste funkcije koja je namenjena za server
+        // Server je koristi kako bi hardkodovano ucitao sample vrednosti u databazu kada je ona inicialno prazna radi lakseg ocenjivanja
+        private void PostaviOglasServerVerzija(string username, string adresa, bool wifi, bool tus, bool parking_mesto, bool tv, string opis, LocalDate[] datumi, string slikaFilename)
+        {
+            // Nabavi id stana
+            Row maxStanId = session.Execute("SELECT MAX(id) FROM \"Stanovi\"").FirstOrDefault();
+            int maxStanIdInt = 0;
+            if (maxStanId == null)
+            {
+                maxStanIdInt = 0;
+            }
+            else
+            {
+                if (maxStanId["system.max(id)"] == null)
+                {
+                    maxStanIdInt = 0;
+                }
+                else
+                {
+                    maxStanIdInt = (int)maxStanId["system.max(id)"];
+                    maxStanIdInt++;
+                }
+            }
+
+            // Nabavi id za UsernameToStanovi
+            Row maxUsernameToStanoviId = session.Execute("SELECT MAX(id) FROM \"UsernameToStanovi\"").FirstOrDefault();
+            int maxUsernameToStanoviIdInt = 0;
+            if (maxUsernameToStanoviId == null)
+            {
+                maxUsernameToStanoviIdInt = 0;
+            }
+            else
+            {
+                if (maxUsernameToStanoviId["system.max(id)"] == null)
+                {
+                    maxUsernameToStanoviIdInt = 0;
+                }
+                else
+                {
+                    maxUsernameToStanoviIdInt = (int)maxUsernameToStanoviId["system.max(id)"];
+                    maxUsernameToStanoviIdInt++;
+                }
+            }
+
+            // Nabavi id za UsernameToStanovi
+            Row maxDatumiToStanoviId = session.Execute("SELECT MAX(id) FROM \"DatumiToStanovi\"").FirstOrDefault();
+            int maxDatumiToStanoviIdInt = 0;
+            if (maxDatumiToStanoviId == null)
+            {
+                maxDatumiToStanoviIdInt = 0;
+            }
+            else
+            {
+                if (maxDatumiToStanoviId["system.max(id)"] == null)
+                {
+                    maxDatumiToStanoviIdInt = 0;
+                }
+                else
+                {
+                    maxDatumiToStanoviIdInt = (int)maxDatumiToStanoviId["system.max(id)"];
+                    maxDatumiToStanoviIdInt++;
+                }
+            }    
+
+            var upit = session.Prepare("insert into \"Stanovi\" " +
+                "(id, username_to_stan_id, datumi_to_stan_id, username, adresa, adresa_terms, wifi, tus, parking_mesto, tv, datumi, opis, slika) " +
+                "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+
+                // napravi listu svih mogucih kombinacija reci za adresa_terms radi robusnije pretrage
+                List<string> listaReciAdrese = (adresa.ToLower()).Split(' ').ToList();
+                int comboCount = (int)Math.Pow(2, listaReciAdrese.Count) - 1;
+                List<List<string>> sveMogucePermutacijeReciAdrese = new List<List<string>>();
+                for (int i = 1; i < comboCount + 1; i++)
+                {
+                    sveMogucePermutacijeReciAdrese.Add(new List<string>());
+                    for (int j = 0; j < listaReciAdrese.Count; j++)
+                    {
+                        if ((i >> j) % 2 != 0)
+                        {
+                            sveMogucePermutacijeReciAdrese.Last().Add(listaReciAdrese[j]);
+                        }
+
+                    }
+                }
+
+                string[] sveMogucePermutacijeReciAdreseArray = new string[sveMogucePermutacijeReciAdrese.Count];
+                for (int i = 0; i < sveMogucePermutacijeReciAdrese.Count; i++)
+                {
+                    for (int j = 0; j < sveMogucePermutacijeReciAdrese[i].Count; j++)
+                    {
+                        sveMogucePermutacijeReciAdreseArray[i] += sveMogucePermutacijeReciAdrese[i][j];
+                        if (j != (sveMogucePermutacijeReciAdrese[i].Count - 1))
+                        {
+                            sveMogucePermutacijeReciAdreseArray[i] += " ";
+                        }
+                    }
+                }
+
+            // Pretvaranje slike u byte array
+            string path = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), slikaFilename);
+            Bitmap myBitmap = new Bitmap(path);
+            byte[] imageByteArray;
+            using (var memoryStream = new MemoryStream())
+            {
+                myBitmap.Save(memoryStream, System.Drawing.Imaging.ImageFormat.Bmp);
+                imageByteArray = memoryStream.ToArray();
+            }
+
+            session.Execute(upit.Bind(
+                    maxStanIdInt,
+                    maxUsernameToStanoviIdInt,
+                    maxDatumiToStanoviIdInt,
+                    username,
+                    adresa,
+                    sveMogucePermutacijeReciAdreseArray,
+                    wifi,
+                    tus,
+                    parking_mesto,
+                    tv,
+                    datumi,
+                    opis,
+                    imageByteArray
+                    ));
+
+
+                // Dodaj maping na ovaj stan u UsernameToStanovi tabeli
+                session.Execute("INSERT INTO \"UsernameToStanovi\" (id, stan_id, username) VALUES (" + maxUsernameToStanoviIdInt + ", " + maxStanIdInt + ", '" + username + "')");
+                // Dodaj maping na ovaj stan u DatumiToStanovi tabeli
+                var upitDatumi = session.Prepare("INSERT INTO \"DatumiToStanovi\" (id, stan_id, earliest_date, farthest_date) VALUES (?, ?, ?, ?)");
+                session.Execute(upitDatumi.Bind(
+                    maxDatumiToStanoviIdInt,
+                    maxStanIdInt,
+                    datumi[0],
+                    datumi[datumi.Length - 1]
+                    ));
+        }
+
+        // Ova verzija funkcije ne proverava da li se datumi u klapaju u dostupnost stana
+        // samo postavlja zahtev, sto je ok jer ce mo ovu funkciju koristiti kako bi iz hardkodovano ubacili neke
+        // primere u databazu radi lakseg ocenjivanja
+        private void PostaviZahtevServerVerzija(int stanId, string zahtevDatumi, string username, string password)
+        {
+            // prvo naci maxId za zahtev
+            Row maxZahtevId = session.Execute("SELECT MAX(id) FROM \"Zahtevi\"").FirstOrDefault();
+            int maxZahtevIdInt = 0;
+            if (maxZahtevId == null)
+            {
+                maxZahtevIdInt = 0;
+            }
+            else
+            {
+                if (maxZahtevId["system.max(id)"] == null)
+                {
+                    maxZahtevIdInt = 0;
+                }
+                else
+                {
+                    maxZahtevIdInt = (int)maxZahtevId["system.max(id)"];
+                    maxZahtevIdInt++;
+                }
+            }
+
+            session.Execute("INSERT INTO \"Zahtevi\" (id, stan_id, status, datumi) VALUES (" + maxZahtevIdInt.ToString() + ", " + stanId.ToString() + ", 0, " + zahtevDatumi + ")");
+            // Ubaciti referencu u stan za koji je zahtev namenjen
+            session.Execute("UPDATE \"Stanovi\" SET zahtevi = [" + maxZahtevIdInt + "] + zahtevi WHERE id = " + stanId);
+            // Ubaciti referencu u nalog koji je napravio zahtev
+            session.Execute("UPDATE \"Accounts\" SET zahtevi = [" + maxZahtevIdInt + "] + zahtevi WHERE username = '" + username + "' AND \"password\" = '" + password + "'");
+        }
+
         public TestHub()
         {
             try
@@ -66,6 +237,110 @@ namespace Server.SignalRServer
             catch (Exception exc)
             {
                 MessageBox.Show(exc.Message);
+            }
+
+            // Provera da li je databaza prazna, ako jeste onda radi lakseg ocenjivanja ce mo je popuniti sa par naloga, stanova i zahteva
+            // VEOMA BITNO, ovaj kod se nece pokrenuti sve dok se ne stvori prvi klijent, jer signalR nece da napravi instancu ove klase dotle
+            RowSet numberOfAccounts = session.Execute("SELECT * FROM \"Accounts\"");
+            int brojac = 0;
+            if (numberOfAccounts != null)
+            {
+                foreach (Row account in numberOfAccounts)
+                {
+                    brojac++;
+                    if (brojac > 0)
+                    {
+                        break;
+                    }
+                }
+            }
+            if ((numberOfAccounts == null) || (brojac == 0))
+            {
+                // Popunjavamo databazu
+                // Dodavanje par naloga
+                session.Execute("INSERT INTO \"Accounts\" (username, \"password\", email, zahtevi) VALUES ('pavle', 'pavle', 'klm@gmail.com', [])");
+                session.Execute("INSERT INTO \"Accounts\" (username, \"password\", email, zahtevi) VALUES ('djordje', 'djordje', 'djoletovMail@gmail.com', [])");
+                session.Execute("INSERT INTO \"Accounts\" (username, \"password\", email, zahtevi) VALUES ('misa', 'misa', 'imePrezime@gmail.com', [])");
+
+                // Dodavanje stanova
+                // pavle izdaje dva stana
+                DateTime datum01 = DateTime.Now;
+                DateTime datum02 = datum01.AddDays(4);
+                DateTime datum03 = datum02.AddDays(1);
+                DateTime datum04 = datum03.AddDays(7);
+                LocalDate localDate01 = new LocalDate(datum01.Year, datum01.Month, datum01.Day);
+                LocalDate localDate02 = new LocalDate(datum02.Year, datum02.Month, datum02.Day);
+                LocalDate localDate03 = new LocalDate(datum03.Year, datum03.Month, datum03.Day);
+                LocalDate localDate04 = new LocalDate(datum04.Year, datum04.Month, datum04.Day);
+                LocalDate[] datumiStan01 = { localDate01, localDate02, localDate03, localDate04 };
+                PostaviOglasServerVerzija("pavle", "Ucitelj Tasina 44", true, true, false, false, "Bas lepo mesto, sve je kako treba", datumiStan01, "Slika01.jpg");
+
+                datum01 = datum01.AddDays(14);
+                datum02 = datum01.AddDays(2);
+                datum03 = datum02.AddDays(3);
+                datum04 = datum03.AddDays(5);
+                localDate01 = new LocalDate(datum01.Year, datum01.Month, datum01.Day);
+                localDate02 = new LocalDate(datum02.Year, datum02.Month, datum02.Day);
+                localDate03 = new LocalDate(datum03.Year, datum03.Month, datum03.Day);
+                localDate04 = new LocalDate(datum04.Year, datum04.Month, datum04.Day);
+                LocalDate[] datumiStan02 = { localDate01, localDate02, localDate03, localDate04 };
+                PostaviOglasServerVerzija("pavle", "Ucitelj Milina 22", false, true, true, true, "Ima najnoviji flat screen TV !!!", datumiStan02, "Slika02.jpg");
+
+                // Misa ima oglas za jedan stan
+                // Identicni datumi kao pavlov drugi
+                PostaviOglasServerVerzija("misa", "Dusanova 2 A", true, true, true, true, "Mozete me kontaktirati preko mog fejsbook naloga Covek123 za vise informacija", datumiStan02, "Slika03.jpg");
+
+                // Postavicemo i par oglasa i djordje i misa traze pavlov stan
+                DateTime zahtevDatum = datum03.AddDays(2);
+                string zahtevDatumi = "['";
+                zahtevDatumi += localDate03.Year.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += localDate03.Month.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += localDate03.Day.ToString();
+                zahtevDatumi += "', '";
+                zahtevDatumi += zahtevDatum.Year.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Month.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Day.ToString();
+                zahtevDatumi += "']";
+                PostaviZahtevServerVerzija(1, zahtevDatumi, "misa", "misa");
+
+                // i djordje trazi pavlov stan
+                // ali ima komplikovaniji zahtev koji se preklapa sa misinim
+                zahtevDatumi = "['";
+                zahtevDatum = datum01.AddDays(1);
+                zahtevDatumi += zahtevDatum.Year.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Month.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Day.ToString();
+                zahtevDatumi += "', '";
+                zahtevDatum = zahtevDatum.AddDays(1);
+                zahtevDatumi += zahtevDatum.Year.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Month.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Day.ToString();
+                zahtevDatumi += "', '";
+                zahtevDatum = datum03.AddDays(1);
+                zahtevDatumi += zahtevDatum.Year.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Month.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Day.ToString();
+                zahtevDatumi += "', '";
+                zahtevDatum = zahtevDatum.AddDays(2);
+                zahtevDatumi += zahtevDatum.Year.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Month.ToString();
+                zahtevDatumi += "-";
+                zahtevDatumi += zahtevDatum.Day.ToString();
+                zahtevDatumi += "']";
+                PostaviZahtevServerVerzija(1, zahtevDatumi, "djordje", "djordje");
+
+                // Eto sada imamo nesto u data bazi
             }
         }
   
@@ -252,7 +527,7 @@ namespace Server.SignalRServer
                     }
                 }
 
-                // Nabavi id za UsernameToStanovi
+                // Nabavi id za DatumiToStanovi
                 Row maxDatumiToStanoviId = session.Execute("SELECT MAX(id) FROM \"DatumiToStanovi\"").FirstOrDefault();
                 int maxDatumiToStanoviIdInt = 0;
                 if (maxDatumiToStanoviId == null)
@@ -405,49 +680,6 @@ namespace Server.SignalRServer
                 }
 
                 oglas.slika = image;
-                /*
-                if (oglas.dodajOglasPozvato == true) // znaci da se ovaj metod pozvao nakon slanja slike
-                {
-                    // Nabavi id stana
-                    Row maxStanId = session.Execute("SELECT MAX(stan_id) FROM \"Stanovi\"").FirstOrDefault();
-                    int maxStanIdInt = (int)maxStanId["system.max(stan_id)"];
-                    maxStanIdInt++;
-
-                    var upit = session.Prepare("insert into \"Stanovi\" " +
-                        "(stan_id, username, adresa, wifi, tus, parking_mesto, tv, datumi, opis, slika) " +
-                        "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-
-                    LocalDate[] localDateArray = new LocalDate[oglas.datumi.Count];
-                    for (int i = 0; i < oglas.datumi.Count; i++)
-                    {
-                        localDateArray[i] = oglas.datumi[i];
-                    }
-
-                    string callerUsername;
-                    connectedUsersConnectionIDToUsername.TryGetValue(Context.ConnectionId, out callerUsername);
-
-                    session.Execute(upit.Bind(
-                        maxStanIdInt,
-                        callerUsername,
-                        oglas.adresa,
-                        oglas.wifi,
-                        oglas.tus,
-                        oglas.parking_mesto,
-                        oglas.tv,
-                        localDateArray,
-                        oglas.opis,
-                        oglas.slika
-                        ));
-
-                    oglas.dodajOglasPozvato = false;
-                    oglas.slikaPostavljena = false;
-
-                    Clients.Caller.OglasUspednoPostavljen("nista");
-                }
-                */
-
-                //string saveImagePath = "D:\\Files\\slika.png";
-                //File.WriteAllBytes(saveImagePath, image);
             }
         }
 

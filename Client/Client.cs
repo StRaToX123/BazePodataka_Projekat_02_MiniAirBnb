@@ -221,39 +221,10 @@ namespace Client
                 mojiZahteviButton.Visible = true;
             };
             mojiZahteviButton.BeginInvoke(action27);
-            /*
-            Action action27 = delegate () {
+            Action action28 = delegate () {
                 dataGridView1.Visible = true;
-                DirectoryInfo dir = new DirectoryInfo(@"c:\pic");
-                foreach (FileInfo file in dir.GetFiles())
-                {
-                    try
-                    {
-                        this.imageList1.Images.Add(Image.FromFile(file.FullName));
-                    }
-                    catch
-                    {
-                        Console.WriteLine("This is not an image file");
-                    }
-                }
-                this.imageList1.ImageSize = new Size(256, 256);
-                dataGridView1.RowTemplate.Resizable = DataGridViewTriState.True;
-                dataGridView1.RowTemplate.Height = 256;
-
-                dataGridView1.RowTemplate.MinimumHeight = 256;
-                dataGridView1.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
-               // for (int i = 0; i < dataGridView1.Columns.Count; i++)
-               // {
-                  //  dataGridView1.Columns[i].AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-                  //  dataGridView1.Columns[i].AutoSizeMode = DataGridViewAutoSizeColumnMode.NotSet;
-               // }
-                dataGridView1.Rows.Add();
-                dataGridView1.Rows[0].Cells[0].Value = imageList1.Images[0];
-                dataGridView1.Rows.Add();
-                dataGridView1.Rows[1].Cells[0].Value = imageList1.Images[1];
             };
-            dataGridView1.BeginInvoke(action27);
-            */
+            dataGridView1.BeginInvoke(action28);
         }
 
         private void LogOutSuccessful(string nista)

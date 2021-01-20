@@ -82,6 +82,8 @@ namespace Client
             this.opisTextBox.Name = "opisTextBox";
             this.opisTextBox.Size = new System.Drawing.Size(556, 140);
             this.opisTextBox.TabIndex = 1;
+            this.opisTextBox.TextChanged += new System.EventHandler(this.opisTextBox_TextChanged);
+            this.opisTextBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.opisTextBox_KeyDown);
             // 
             // pictureBox1
             // 
