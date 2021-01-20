@@ -30,6 +30,8 @@ namespace Client
         public int slikaReceivedNumberOfBytes;
         public string opis;
         public List<Zahtev> zahtevi;
+        public bool slikaPrimljena;
+        public bool oglasPrimljen;
 
     }
 

@@ -46,8 +46,28 @@ namespace Server.SignalRServer
             public byte[] slika;
             public string opis;
             public List<Zahtev> zahtevi;
-            public bool dodajOglasPozvato;
+            public bool dodajOglasPozvano;
             public bool slikaPostavljena;
+        }
+
+        public class BlokSlike
+        {
+            public BlokSlike() { }
+            public int oglasIndex;
+            public int offset;
+            public byte[] blok;
+            public int velicinaCeleSlike;
+            public bool jestePoslednji;
+        }
+
+        public class StaTrebaPoslatiKlijentu
+        {
+            
+            public StaTrebaPoslatiKlijentu() { }
+            public string oglasiData;
+            public List<List<BlokSlike>> slikeUDeloviva; // za svaku sliku po jedna lista byte arrays
+            public int kojuSlikuSaljemo;
+            public int kojiDeoSlike;
         }
 
         // imamo dva recnika jedan u kome je connectionID ismedju servera i klijenta kljuc koji vodi ka account username
@@ -57,6 +77,7 @@ namespace Server.SignalRServer
         public static ConcurrentDictionary<string, string> connectedUsersConnectionIDToPassword = new ConcurrentDictionary<string, string>();
         public static ConcurrentDictionary<string, List<byte[]>> connectedUsersConnectionIDToImageBlockList = new ConcurrentDictionary<string, List<byte[]>>();
         public static ConcurrentDictionary<string, Oglas> connectedUsersConnectionIDToOglas = new ConcurrentDictionary<string, Oglas>();
+        public static ConcurrentDictionary<string, StaTrebaPoslatiKlijentu> connectedUserConnectionIdToStaTrebaPoslatiKlijentu = new ConcurrentDictionary<string, StaTrebaPoslatiKlijentu>();
 
         // Radi isto sto i PostaviOglasi, samo sto je ta funkcija namenjena za klijente dok je ovo verzija te iste funkcije koja je namenjena za server
         // Server je koristi kako bi hardkodovano ucitao sample vrednosti u databazu kada je ona inicialno prazna radi lakseg ocenjivanja
@@ -102,32 +123,30 @@ namespace Server.SignalRServer
                 }
             }
 
-            // Nabavi id za UsernameToStanovi
-            Row maxDatumiToStanoviId = session.Execute("SELECT MAX(id) FROM \"DatumiToStanovi\"").FirstOrDefault();
-            int maxDatumiToStanoviIdInt = 0;
-            if (maxDatumiToStanoviId == null)
-            {
-                maxDatumiToStanoviIdInt = 0;
-            }
-            else
-            {
-                if (maxDatumiToStanoviId["system.max(id)"] == null)
-                {
-                    maxDatumiToStanoviIdInt = 0;
-                }
-                else
-                {
-                    maxDatumiToStanoviIdInt = (int)maxDatumiToStanoviId["system.max(id)"];
-                    maxDatumiToStanoviIdInt++;
-                }
-            }    
 
             var upit = session.Prepare("insert into \"Stanovi\" " +
-                "(id, username_to_stan_id, datumi_to_stan_id, username, adresa, adresa_terms, wifi, tus, parking_mesto, tv, datumi, opis, slika) " +
-                "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                     "(id, username_to_stan_id, username, adresa, adresa_terms, wifi, tus, parking_mesto, tv, datumi, earliest_date, farthest_date, opis, slika, zahtevi, obrisan) " +
+                     "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
-                // napravi listu svih mogucih kombinacija reci za adresa_terms radi robusnije pretrage
-                List<string> listaReciAdrese = (adresa.ToLower()).Split(' ').ToList();
+
+            // Odredi najraniji i najkasniji datum
+            LocalDate earliestDate = datumi[0];
+            LocalDate farthestDate = datumi[0];
+            for (int i = 0; i < datumi.Length; i++)
+            {
+                if (datumi[i] < earliestDate)
+                {
+                    earliestDate = datumi[i];
+                }
+
+                if (datumi[i] > farthestDate)
+                {
+                    farthestDate = datumi[i];
+                }
+            }
+
+            // napravi listu svih mogucih kombinacija reci za adresa_terms radi robusnije pretrage
+            List<string> listaReciAdrese = (adresa.ToLower()).Split(' ').ToList();
                 int comboCount = (int)Math.Pow(2, listaReciAdrese.Count) - 1;
                 List<List<string>> sveMogucePermutacijeReciAdrese = new List<List<string>>();
                 for (int i = 1; i < comboCount + 1; i++)
@@ -166,10 +185,10 @@ namespace Server.SignalRServer
                 imageByteArray = memoryStream.ToArray();
             }
 
+            int[] emptyIntArray = { };
             session.Execute(upit.Bind(
                     maxStanIdInt,
                     maxUsernameToStanoviIdInt,
-                    maxDatumiToStanoviIdInt,
                     username,
                     adresa,
                     sveMogucePermutacijeReciAdreseArray,
@@ -178,21 +197,17 @@ namespace Server.SignalRServer
                     parking_mesto,
                     tv,
                     datumi,
+                    earliestDate,
+                    farthestDate,
                     opis,
-                    imageByteArray
+                    imageByteArray,
+                    emptyIntArray,
+                    false
                     ));
 
 
                 // Dodaj maping na ovaj stan u UsernameToStanovi tabeli
                 session.Execute("INSERT INTO \"UsernameToStanovi\" (id, stan_id, username) VALUES (" + maxUsernameToStanoviIdInt + ", " + maxStanIdInt + ", '" + username + "')");
-                // Dodaj maping na ovaj stan u DatumiToStanovi tabeli
-                var upitDatumi = session.Prepare("INSERT INTO \"DatumiToStanovi\" (id, stan_id, earliest_date, farthest_date) VALUES (?, ?, ?, ?)");
-                session.Execute(upitDatumi.Bind(
-                    maxDatumiToStanoviIdInt,
-                    maxStanIdInt,
-                    datumi[0],
-                    datumi[datumi.Length - 1]
-                    ));
         }
 
         // Ova verzija funkcije ne proverava da li se datumi u klapaju u dostupnost stana
@@ -377,17 +392,21 @@ namespace Server.SignalRServer
                 return;
             }
 
+            List<byte[]> garbageList;
+            Oglas garbageOglas;
             connectedUsersConnectionIDToUsername.TryAdd(Context.ConnectionId, username);
             connectedUsersUsernameToConnectionID.TryAdd(username, Context.ConnectionId);
             connectedUsersConnectionIDToPassword.TryAdd(Context.ConnectionId, password);
-
+            connectedUsersConnectionIDToImageBlockList.TryRemove(Context.ConnectionId, out garbageList);
+            connectedUsersConnectionIDToOglas.TryRemove(Context.ConnectionId, out garbageOglas);
+            StaTrebaPoslatiKlijentu garbageStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryRemove(Context.ConnectionId, out garbageStaTrebaPoslatiKlijentu);
             Clients.Caller.LogInSuccessful(username);
         }
 
         // Radi isto sto i Disconnect samo na zahtev korisnika
         public void LogOut(string nista)
         {
-            // Prvo moramo javiti 
             string callerUsername;
             connectedUsersConnectionIDToUsername.TryGetValue(Context.ConnectionId, out callerUsername);
             if (callerUsername != null)
@@ -401,6 +420,8 @@ namespace Server.SignalRServer
                 connectedUsersConnectionIDToPassword.TryRemove(Context.ConnectionId, out garbage);
                 connectedUsersConnectionIDToImageBlockList.TryRemove(Context.ConnectionId, out garbageList);
                 connectedUsersConnectionIDToOglas.TryRemove(Context.ConnectionId, out garbageOglas);
+                StaTrebaPoslatiKlijentu garbageStaTrebaPoslatiKlijentu;
+                connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryRemove(Context.ConnectionId, out garbageStaTrebaPoslatiKlijentu);
 
                 Clients.Caller.LogOutSuccessful("nista");
             }
@@ -440,7 +461,7 @@ namespace Server.SignalRServer
             {
                 oglas = new Oglas();
                 oglas.datumi = new List<LocalDate>();
-                oglas.dodajOglasPozvato = true;
+                oglas.dodajOglasPozvano = true;
                 oglas.slikaPostavljena = false;
                 connectedUsersConnectionIDToOglas.TryAdd(Context.ConnectionId, oglas);
             }
@@ -483,7 +504,7 @@ namespace Server.SignalRServer
                 }
             }          
 
-            oglas.dodajOglasPozvato = true;
+            oglas.dodajOglasPozvano = true;
 
             if (oglas.slikaPostavljena == true) // znaci da se ovaj metod pozvao nakon slanja slike
             {
@@ -527,37 +548,33 @@ namespace Server.SignalRServer
                     }
                 }
 
-                // Nabavi id za DatumiToStanovi
-                Row maxDatumiToStanoviId = session.Execute("SELECT MAX(id) FROM \"DatumiToStanovi\"").FirstOrDefault();
-                int maxDatumiToStanoviIdInt = 0;
-                if (maxDatumiToStanoviId == null)
-                {
-                    maxDatumiToStanoviIdInt = 0;
-                }
-                else
-                {
-                    if (maxDatumiToStanoviId["system.max(id)"] == null)
-                    {
-                        maxDatumiToStanoviIdInt = 0;
-                    }
-                    else
-                    {
-                        maxDatumiToStanoviIdInt = (int)maxDatumiToStanoviId["system.max(id)"];
-                        maxDatumiToStanoviIdInt++;
-                    }
-                }
-
                 string callerUsername;
                 connectedUsersConnectionIDToUsername.TryGetValue(Context.ConnectionId, out callerUsername);
 
                 var upit = session.Prepare("insert into \"Stanovi\" " +
-                    "(id, username_to_stan_id, datumi_to_stan_id, username, adresa, adresa_terms, wifi, tus, parking_mesto, tv, datumi, opis, slika) " +
-                    "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                     "(id, username_to_stan_id, username, adresa, adresa_terms, wifi, tus, parking_mesto, tv, datumi, earliest_date, farthest_date, opis, slika, zahtevi, obrisan) " +
+                     "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
                 LocalDate[] localDateArray = new LocalDate[oglas.datumi.Count];
                 for (int i = 0; i < oglas.datumi.Count; i++)
                 {
                     localDateArray[i] = oglas.datumi[i];
+                }
+
+                // Odredi najraniji i najkasniji datum
+                LocalDate earliestDate = localDateArray[0];
+                LocalDate farthestDate = localDateArray[0];
+                for (int i = 0; i < localDateArray.Length; i++)
+                {
+                    if (localDateArray[i] < earliestDate)
+                    {
+                        earliestDate = localDateArray[i];
+                    }
+
+                    if (localDateArray[i] > farthestDate)
+                    {
+                        farthestDate = localDateArray[i];
+                    }
                 }
 
                 // napravi listu svih mogucih kombinacija reci za adresa_terms radi robusnije pretrage
@@ -590,10 +607,10 @@ namespace Server.SignalRServer
                     }
                 }
 
+                int[] emptyIntArray = { };
                 session.Execute(upit.Bind(
                     maxStanIdInt,
                     maxUsernameToStanoviIdInt,
-                    maxDatumiToStanoviIdInt,
                     callerUsername,
                     oglas.adresa,
                     sveMogucePermutacijeReciAdreseArray,
@@ -602,23 +619,19 @@ namespace Server.SignalRServer
                     oglas.parking_mesto,
                     oglas.tv,
                     localDateArray,
+                    earliestDate,
+                    farthestDate,
                     oglas.opis,
-                    oglas.slika
+                    oglas.slika,
+                    emptyIntArray,
+                    false
                     ));
 
-                oglas.dodajOglasPozvato = false;
+                oglas.dodajOglasPozvano = false;
                 oglas.slikaPostavljena = false;
 
                 // Dodaj maping na ovaj stan u UsernameToStanovi tabeli
                 session.Execute("INSERT INTO \"UsernameToStanovi\" (id, stan_id, username) VALUES (" + maxUsernameToStanoviIdInt + ", " + maxStanIdInt + ", '" + callerUsername + "')");
-                // Dodaj maping na ovaj stan u DatumiToStanovi tabeli
-                var upitDatumi = session.Prepare("INSERT INTO \"DatumiToStanovi\" (id, stan_id, earliest_date, farthest_date) VALUES (?, ?, ?, ?)");
-                session.Execute(upitDatumi.Bind(
-                    maxStanIdInt,
-                    maxDatumiToStanoviIdInt,
-                    oglas.earliest_date,
-                    oglas.farthest_date
-                    ));
 
                 // Izbrisati asocijacije stavke iz recnika
                 List<byte[]> garbageList;
@@ -674,7 +687,7 @@ namespace Server.SignalRServer
                 {
                     oglas = new Oglas();
                     oglas.datumi = new List<LocalDate>();
-                    oglas.dodajOglasPozvato = false;
+                    oglas.dodajOglasPozvano = false;
                     oglas.slikaPostavljena = true;
                     connectedUsersConnectionIDToOglas.TryAdd(Context.ConnectionId, oglas);
                 }
@@ -685,6 +698,19 @@ namespace Server.SignalRServer
 
         public void PribaviMojeOglase(string nista)
         {
+            // Da li ovaj klijent vec ima neki aktivan zahtev
+            StaTrebaPoslatiKlijentu outStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryGetValue(Context.ConnectionId, out outStaTrebaPoslatiKlijentu);
+            if (outStaTrebaPoslatiKlijentu != null)
+            {
+                return;
+            }
+
+            // Ako ovaj klijent nema na cekanju neki zahtev onda mozemo da obradimo sta je hteo
+            outStaTrebaPoslatiKlijentu = new StaTrebaPoslatiKlijentu();
+            outStaTrebaPoslatiKlijentu.slikeUDeloviva = new List<List<BlokSlike>>();
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryAdd(Context.ConnectionId, outStaTrebaPoslatiKlijentu);
+
             string callerUsername;
             connectedUsersConnectionIDToUsername.TryGetValue(Context.ConnectionId, out callerUsername);
 
@@ -727,6 +753,13 @@ namespace Server.SignalRServer
             int counter = 0;
             foreach (Row oglas in oglasi)
             {
+                if ((bool)oglas["obrisan"] == true) // stan je obrisan ali ga jos uvek cuvamo jer nisu svi klijenti videli da su njihovi zahtevi odbijeni
+                {
+                    continue;
+                }
+
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva.Add(new List<BlokSlike>());
+
                 oglasiString += counter.ToString();
                 oglasiString += "@";
                 oglasiString += oglas["adresa"].ToString();
@@ -841,7 +874,14 @@ namespace Server.SignalRServer
                 {
                     byte[] block = new byte[30720];
                     System.Buffer.BlockCopy(slika, offset, block, 0, 30720);
-                    Clients.Caller.PribaviMojeOglaseSlikaOdgovor(counter, offset, slika.Length, false, block);
+                    BlokSlike noviBlokSlike = new BlokSlike();
+                    noviBlokSlike.blok = block;
+                    noviBlokSlike.jestePoslednji = false;
+                    noviBlokSlike.oglasIndex = counter;
+                    noviBlokSlike.velicinaCeleSlike = slika.Length;
+                    noviBlokSlike.offset = offset;
+                    //Clients.Caller.PribaviMojeOglaseSlikaOdgovor(counter, offset, slika.Length, false, block);
+                    outStaTrebaPoslatiKlijentu.slikeUDeloviva[counter].Add(noviBlokSlike);
                     offset += 30720;
                 }
 
@@ -849,18 +889,86 @@ namespace Server.SignalRServer
                 {
                     byte[] lastBlock = new byte[slika.Length - offset];
                     System.Buffer.BlockCopy(slika, offset, lastBlock, 0, slika.Length - offset);
-                    Clients.Caller.PribaviMojeOglaseSlikaOdgovor(counter, offset, slika.Length, true, lastBlock);
+                    BlokSlike noviBlokSlike = new BlokSlike();
+                    noviBlokSlike.blok = lastBlock;
+                    noviBlokSlike.jestePoslednji = true;
+                    noviBlokSlike.oglasIndex = counter;
+                    noviBlokSlike.velicinaCeleSlike = slika.Length;
+                    noviBlokSlike.offset = offset;
+                    //Clients.Caller.PribaviMojeOglaseSlikaOdgovor(counter, offset, slika.Length, true, lastBlock);
+                    outStaTrebaPoslatiKlijentu.slikeUDeloviva[counter].Add(noviBlokSlike);
                 }
 
                 counter++;
             }
 
-            // Vrati informacije o oglasima klijentu bez slika,
-            // Slike cemo naknadno poslati preko blokova
-            Clients.Caller.PribaviMojeOglaseOdgovor(oglasiString);
+
+            outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo = 0;
+            outStaTrebaPoslatiKlijentu.kojiDeoSlike = 0;
+            outStaTrebaPoslatiKlijentu.oglasiData = oglasiString;
+
+            // Sada mozemo poslati klijentu nazad prvi deo prve slike
+            if (outStaTrebaPoslatiKlijentu.oglasiData == "")
+            {
+                // nema sta da saljemo nazad
+                StaTrebaPoslatiKlijentu garbageStaTrebaPoslatiKlijentu;
+                connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryRemove(Context.ConnectionId, out garbageStaTrebaPoslatiKlijentu);
+                Clients.Caller.NistaNijeNadjeno("nista");
+                return;
+            }
+
+            Clients.Caller.PribaviMojeOglaseSlikaOdgovor(outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].offset,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].velicinaCeleSlike,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].jestePoslednji,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].blok);
         }
-        
-        
+
+        // Pozivom ove funkcije nam klijent odgovara da je primio poruku
+        public void PribaviMojeOglaseSlikaOdgovorPrimljen(string nista)
+        {
+            StaTrebaPoslatiKlijentu outStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryGetValue(Context.ConnectionId, out outStaTrebaPoslatiKlijentu);
+            if (outStaTrebaPoslatiKlijentu == null)
+            {
+                return;
+            }
+
+            outStaTrebaPoslatiKlijentu.kojiDeoSlike++;
+            if (outStaTrebaPoslatiKlijentu.kojiDeoSlike > (outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo].Count - 1))
+            {
+                outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo++;
+                outStaTrebaPoslatiKlijentu.kojiDeoSlike = 0;
+            }
+
+            if (outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo > (outStaTrebaPoslatiKlijentu.slikeUDeloviva.Count - 1))
+            {
+                // Ako smo poslali sve delove svih slika, onda mozemo da posaljemo oglasi data
+                Clients.Caller.PribaviMojeOglaseOdgovor(outStaTrebaPoslatiKlijentu.oglasiData);
+            }
+            else
+            {
+                // Ako ima jos blokova slika koje treba poslati onda ovde saljemo naredni
+                Clients.Caller.PribaviMojeOglaseSlikaOdgovor(outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].offset,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].velicinaCeleSlike,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].jestePoslednji,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].blok);
+            }
+        }
+
+        // Pozivom ove funkcije nam klijent odgovara da je primio poruku
+        public void PribaviMojeOglaseOdgovorPrimljen(string nista)
+        {
+            // Ako je klijent primio sve mozemo ga izbrisati iz nasih zahteva
+            StaTrebaPoslatiKlijentu garbageStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryRemove(Context.ConnectionId, out garbageStaTrebaPoslatiKlijentu);
+        }
+
+
+
+
+
         public void PretraziOglase(string adresa,
             int datumOdGodina,
             int datumOdMesec,
@@ -869,34 +977,96 @@ namespace Server.SignalRServer
             int datumDoMesec,
             int datumDoDan)
         {
-            RowSet oglasi;
-            RowSet stanIds = session.Execute("SELECT stan_id FROM \"DatumiToStanovi\" WHERE earliest_date <= '" + datumOdGodina.ToString() + "-" + datumOdMesec.ToString() + "-" + datumOdDan.ToString() + "' AND farthest_date >= '" + datumDoGodina.ToString() + "-" + datumDoMesec.ToString() + "-" + datumDoDan.ToString() + "' ALLOW FILTERING");
-            if (stanIds == null)
+            // Da li ovaj klijent vec ima neki aktivan zahtev
+            StaTrebaPoslatiKlijentu outStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryGetValue(Context.ConnectionId, out outStaTrebaPoslatiKlijentu);
+            if (outStaTrebaPoslatiKlijentu != null)
+            {
+                return;
+            }
+
+            // Ako ovaj klijent nema na cekanju neki zahtev onda mozemo da obradimo sta je hteo
+            outStaTrebaPoslatiKlijentu = new StaTrebaPoslatiKlijentu();
+            outStaTrebaPoslatiKlijentu.slikeUDeloviva = new List<List<BlokSlike>>();
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryAdd(Context.ConnectionId, outStaTrebaPoslatiKlijentu);
+
+            // Pretraga po datumu
+            LocalDate datumOd = new LocalDate(datumOdGodina, datumOdMesec, datumOdDan);
+            LocalDate datumDo = new LocalDate(datumDoGodina, datumDoMesec, datumDoDan);
+            RowSet upitPoDatumima = session.Execute("SELECT id, earliest_date, farthest_date, obrisan FROM \"Stanovi\"");
+
+            if (upitPoDatumima == null)
             {
                 return;
             }
 
             List<int> stanIdsList = new List<int>();
-            foreach (Row stanId in stanIds)
+            foreach (Row row in upitPoDatumima)
             {
-                stanIdsList.Add((int)stanId["stan_id"]);
-            }
-
-            if (adresa != "") // pretraga i po adresi
-            {
-                stanIds = session.Execute("SELECT id FROM \"Stanovi\" WHERE adresa_terms CONTAINS '" + adresa + "'");
-                if (stanIds != null)
+                if (row != null)
                 {
-                    foreach (Row stanId in stanIds)
+                    if ((bool)row["obrisan"] == true) // ako je stan obrisan ali ga cuvamo jer nisu jos svi klijenti videli da su im zahtevi odbijeni, onda preskacemo ovaj stan
                     {
-                        stanIdsList.Add((int)stanId["id"]);
+                        continue; 
+                    }
+
+                    LocalDate earliestDate = (LocalDate)row["earliest_date"];
+                    LocalDate farthestDate = (LocalDate)row["farthest_date"];
+
+                    if ((datumOd > farthestDate) || (datumDo < earliestDate))
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        stanIdsList.Add((int)row["id"]);
                     }
                 }
             }
 
-            // Odvojiti samo unikatne stan_id-ove
-            stanIdsList = stanIdsList.Distinct().ToList();
+            // pretraga i po adresi
+            if (adresa != "") // ako se trazi
+            {
+                List<int> stanIdsListAdrese = new List<int>();
+                RowSet pretragaPoAdresiUpit = session.Execute("SELECT id, obrisan FROM \"Stanovi\" WHERE adresa_terms CONTAINS '" + adresa + "'");
+                if (pretragaPoAdresiUpit != null)
+                {
+                    foreach (Row row in pretragaPoAdresiUpit)
+                    {
+                        if ((bool)row["obrisan"] == true) // ako je stan obrisan ali ga cuvamo jer nisu jos svi klijenti videli da su im zahtevi odbijeni, onda preskacemo ovaj stan
+                        {
+                            continue; 
+                        }
 
+                        stanIdsListAdrese.Add((int)row["id"]);
+                    }
+
+                    // Izdvojitisam samo one standIds koji su u ove liste, i po datumu i po adresi
+                    for (int i = 0; i < stanIdsList.Count; i++)
+                    {
+                        bool postojiUObeListe = false;
+                        for (int j = 0; j < stanIdsListAdrese.Count; j++)
+                        {
+                            if (stanIdsListAdrese[j] == stanIdsList[i])
+                            {
+                                postojiUObeListe = true;
+                                break;
+                            }
+                        }
+
+                        if (postojiUObeListe == false)
+                        {
+                            stanIdsList.RemoveAt(i);
+                            i--;
+                        }
+                    }
+
+                    // Nakon ovoga ako smo radili i pretrazivanje po adresi u stanIdsList se nalaze stanIds koji su na toj adresi i upadaju u opseg datuma
+                }
+            }
+
+
+            // Pretvoriti stanIdsList u string
             string stanIdsString = "(";
             for (int i = 0; i < stanIdsList.Count; i++)
             {
@@ -909,13 +1079,15 @@ namespace Server.SignalRServer
             }
 
             stanIdsString += ")";
-            oglasi = session.Execute("SELECT * FROM \"Stanovi\" WHERE id IN " + stanIdsString);       
+            RowSet oglasi = session.Execute("SELECT * FROM \"Stanovi\" WHERE id IN " + stanIdsString);       
 
             // Sada mozemo da vratimo sve oglse klijentu
             string oglasiString = "";
             int counter = 0;
             foreach (Row oglas in oglasi)
             {
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva.Add(new List<BlokSlike>());
+
                 oglasiString += counter.ToString();
                 oglasiString += "@";
                 oglasiString += oglas["adresa"].ToString();
@@ -956,6 +1128,7 @@ namespace Server.SignalRServer
 
                 oglasiString += "%";
 
+                // Dodati u listu slika koje treba poslati
                 byte[] slika = ((byte[])oglas["slika"]);
                 int numberOfIterations = slika.Length / 30720;
                 int maxNumberOfBlocks = numberOfIterations;
@@ -969,7 +1142,14 @@ namespace Server.SignalRServer
                 {
                     byte[] block = new byte[30720];
                     System.Buffer.BlockCopy(slika, offset, block, 0, 30720);
-                    Clients.Caller.PretraziOglaseSlikaOdgovor(counter, offset, slika.Length, false, block);
+                    BlokSlike noviBlokSlike = new BlokSlike();
+                    noviBlokSlike.blok = block;
+                    noviBlokSlike.jestePoslednji = false;
+                    noviBlokSlike.oglasIndex = counter;
+                    noviBlokSlike.velicinaCeleSlike = slika.Length;
+                    noviBlokSlike.offset = offset;
+                    //Clients.Caller.PretraziOglaseSlikaOdgovor(counter, offset, slika.Length, false, block);
+                    outStaTrebaPoslatiKlijentu.slikeUDeloviva[counter].Add(noviBlokSlike);
                     offset += 30720;
                 }
 
@@ -977,15 +1157,80 @@ namespace Server.SignalRServer
                 {
                     byte[] lastBlock = new byte[slika.Length - offset];
                     System.Buffer.BlockCopy(slika, offset, lastBlock, 0, slika.Length - offset);
-                    Clients.Caller.PretraziOglaseSlikaOdgovor(counter, offset, slika.Length, true, lastBlock);
+                    BlokSlike noviBlokSlike = new BlokSlike();
+                    noviBlokSlike.blok = lastBlock;
+                    noviBlokSlike.jestePoslednji = true;
+                    noviBlokSlike.oglasIndex = counter;
+                    noviBlokSlike.velicinaCeleSlike = slika.Length;
+                    noviBlokSlike.offset = offset;
+                    //Clients.Caller.PretraziOglaseSlikaOdgovor(counter, offset, slika.Length, true, lastBlock);
+                    outStaTrebaPoslatiKlijentu.slikeUDeloviva[counter].Add(noviBlokSlike);
                 }
 
                 counter++;
             }
 
-            // Vrati informacije o oglasima klijentu bez slika,
-            // Slike cemo naknadno poslati preko blokova
-            Clients.Caller.PretraziOglaseOdgovor(oglasiString);
+            
+            outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo = 0;
+            outStaTrebaPoslatiKlijentu.kojiDeoSlike = 0;
+            outStaTrebaPoslatiKlijentu.oglasiData = oglasiString;
+
+            // Sada mozemo poslati klijentu nazad prvi deo prve slike
+            if (outStaTrebaPoslatiKlijentu.oglasiData == "")
+            {
+                // nema sta da saljemo nazad
+                StaTrebaPoslatiKlijentu garbageStaTrebaPoslatiKlijentu;
+                connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryRemove(Context.ConnectionId, out garbageStaTrebaPoslatiKlijentu);
+                Clients.Caller.NistaNijeNadjeno("nista");
+                return;
+            }
+
+            Clients.Caller.PretraziOglaseSlikaOdgovor(outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo, 
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].offset,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].velicinaCeleSlike,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].jestePoslednji,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].blok);
+        }
+
+        // Pozivom ove funkcije nam klijent odgovara da je primio poruku
+        public void PretraziOglaseSlikaOdgovorPrimljen(string nista)
+        {
+            StaTrebaPoslatiKlijentu outStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryGetValue(Context.ConnectionId, out outStaTrebaPoslatiKlijentu);
+            if (outStaTrebaPoslatiKlijentu == null)
+            {
+                return;
+            }
+
+            outStaTrebaPoslatiKlijentu.kojiDeoSlike++;
+            if (outStaTrebaPoslatiKlijentu.kojiDeoSlike > (outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo].Count - 1))
+            {
+                outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo++;
+                outStaTrebaPoslatiKlijentu.kojiDeoSlike = 0;
+            }
+
+            if (outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo > (outStaTrebaPoslatiKlijentu.slikeUDeloviva.Count - 1))
+            {
+                // Ako smo poslali sve delove svih slika, onda mozemo da posaljemo oglasi data
+                Clients.Caller.PretraziOglaseOdgovor(outStaTrebaPoslatiKlijentu.oglasiData);
+            }
+            else
+            {
+                // Ako ima jos blokova slika koje treba poslati onda ovde saljemo naredni
+                Clients.Caller.PretraziOglaseSlikaOdgovor(outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].offset,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].velicinaCeleSlike,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].jestePoslednji,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].blok);
+            }
+        }
+
+        // Pozivom ove funkcije nam klijent odgovara da je primio poruku
+        public void PretraziOglaseOdgovorPrimljen(string nista)
+        {
+            // Ako je klijent primio sve mozemo ga izbrisati iz nasih zahteva
+            StaTrebaPoslatiKlijentu garbageStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryRemove(Context.ConnectionId, out garbageStaTrebaPoslatiKlijentu);
         }
 
         public void PostaviZahtev(int stanId, string zahtevDatumi)
@@ -1124,10 +1369,10 @@ namespace Server.SignalRServer
 
         public void ObrisiStan(int stanId)
         {
-            Row upit = session.Execute("SELECT datumi_to_stan_id, username_to_stan_id, zahtevi FROM \"Stanovi\" WHERE id = " + stanId.ToString()).FirstOrDefault();
+            Row upit = session.Execute("SELECT username_to_stan_id, zahtevi FROM \"Stanovi\" WHERE id = " + stanId.ToString()).FirstOrDefault();
             if (upit != null)
             {
-                // Prvo cemo postaviti status svih zahteva za ovaj stan na 3, sto signalizira da je oglas stana izbrisan
+                // Prvo cemo postaviti status svih zahteva za ovaj stan na , sto signalizira da su zahtevi odbijeni
                 List<int> zahteviIdsList = ((int[])upit["zahtevi"]).ToList();
                 if (zahteviIdsList.Count != 0)
                 {
@@ -1146,10 +1391,23 @@ namespace Server.SignalRServer
                 }
 
                 // Sada cemo izbrisati vrstu iz UsernameToStanovi tabele
-                session.Execute("DELETE FROM \"UsernameToStanovi\" WHERE id = " + ((int)upit["username_to_stan_id"]).ToString());
+                string callerUsername;
+                connectedUsersConnectionIDToUsername.TryGetValue(Context.ConnectionId, out callerUsername);
+                session.Execute("DELETE FROM \"UsernameToStanovi\" WHERE username = '" + callerUsername + "' AND id = " + ((int)upit["username_to_stan_id"]).ToString());
 
-                // Sada cemo izbrisati vrstu iz DatumiToStanovi tabele
-                session.Execute("DELETE FROM \"DatumiToStanovi\" WHERE id = " + ((int)upit["datumi_to_stan_id"]).ToString());
+                // Sada cemo izbrisati stan
+                // Ako stan ima zahteve onda ne mozemo ga jos uvek izbrisati iz databaze, inace klijenti koji su poslali zahtev nece moci videti
+                // da je njihov zahtev odbijen, jer prikaz zahteva (Dugme moji zahtevi) zahteva i prikaz stana za koji je zahtev napravljen
+                // Ali zato mozemo oznaciti stan da nije ativan vise kako ga nebi uzimali u obzir pri pretragama
+                // stan cemo izbrisati kada se poslednji zahtev ukloni (kada ga vidi korisnik)
+                if (zahteviIdsList.Count != 0)
+                {
+                    session.Execute("UPDATE \"Stanovi\" SET obrisan = true WHERE id = " + stanId.ToString());
+                }
+                else
+                {
+                    session.Execute("DELETE FROM \"Stanovi\" WHERE id = " + stanId.ToString());
+                }
             }
 
             Clients.Caller.OglasUspesnoObrisan("nista");
@@ -1206,19 +1464,33 @@ namespace Server.SignalRServer
                         }
                     }
 
-                    string zahteviIdsString = "[";
-                    for (int i = 0; i < zahteviIdsList.Count; i++)
+                    // Provera da li je ovaj stan vec izbrisan od strane vlasnika, samo cekamo poslednji zahtev da se obrise
+                    // kako bi uklonili ceo stan iz databaze
+                    Row obrisanStatus = session.Execute("SELECT obrisan FROM \"Stanovi\" WHERE id = " + stanId.ToString()).FirstOrDefault();
+                    if (obrisanStatus != null)
                     {
-                        zahteviIdsString += zahteviIdsList[i].ToString();
-                        if (i != (zahteviIdsList.Count - 1))
+                        if (((bool)obrisanStatus["obrisan"] == true) && (zahteviIdsList.Count == 0))
                         {
-                            zahteviIdsString += ", ";
+                            // mozemo da izbrisemo ceo stan
+                            session.Execute("DELETE FROM \"Stanovi\" WHERE id = " + stanId.ToString());
+                        }
+                        else
+                        {
+                            string zahteviIdsString = "[";
+                            for (int i = 0; i < zahteviIdsList.Count; i++)
+                            {
+                                zahteviIdsString += zahteviIdsList[i].ToString();
+                                if (i != (zahteviIdsList.Count - 1))
+                                {
+                                    zahteviIdsString += ", ";
+                                }
+                            }
+
+                            zahteviIdsString += "]";
+
+                            session.Execute("UPDATE \"Stanovi\" SET zahtevi = " + zahteviIdsString.ToString() + " WHERE id = " + stanId.ToString());
                         }
                     }
-
-                    zahteviIdsString += "]";
-
-                    session.Execute("UPDATE \"Stanovi\" SET zahtevi = " + zahteviIdsString + " WHERE id = " + stanId);
                 }
             }
 
@@ -1268,6 +1540,19 @@ namespace Server.SignalRServer
 
         public void PribaviMojeZahteve(string nista)
         {
+            // Da li ovaj klijent ima vec neki zahtev koji server obradjuje
+             StaTrebaPoslatiKlijentu outStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryGetValue(Context.ConnectionId, out outStaTrebaPoslatiKlijentu);
+            if (outStaTrebaPoslatiKlijentu != null)
+            {
+                return;
+            }
+
+            // Ako ovaj klijent nema na cekanju neki zahtev onda mozemo da obradimo sta je hteo
+            outStaTrebaPoslatiKlijentu = new StaTrebaPoslatiKlijentu();
+            outStaTrebaPoslatiKlijentu.slikeUDeloviva = new List<List<BlokSlike>>();
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryAdd(Context.ConnectionId, outStaTrebaPoslatiKlijentu);
+
             string callerUsername;
             connectedUsersConnectionIDToUsername.TryGetValue(Context.ConnectionId, out callerUsername);
             string callerPassword;
@@ -1385,6 +1670,8 @@ namespace Server.SignalRServer
             string resultString = "";
             for(int i = 0; i < oglasiList.Count; i++)
             {
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva.Add(new List<BlokSlike>());
+
                 resultString += i.ToString();
                 resultString += "@";
                 resultString += oglasiList[i].adresa;
@@ -1456,7 +1743,14 @@ namespace Server.SignalRServer
                 {
                     byte[] block = new byte[30720];
                     System.Buffer.BlockCopy(slika, offset, block, 0, 30720);
-                    Clients.Caller.PribaviMojeZahteveSlikaOdgovor(i, offset, slika.Length, false, block);
+                    BlokSlike noviBlokSlike = new BlokSlike();
+                    noviBlokSlike.blok = block;
+                    noviBlokSlike.jestePoslednji = false;
+                    noviBlokSlike.oglasIndex = i;
+                    noviBlokSlike.velicinaCeleSlike = slika.Length;
+                    noviBlokSlike.offset = offset;
+                    //Clients.Caller.PribaviMojeZahteveSlikaOdgovor(i, offset, slika.Length, false, block);
+                    outStaTrebaPoslatiKlijentu.slikeUDeloviva[i].Add(noviBlokSlike);
                     offset += 30720;
                 }
 
@@ -1464,13 +1758,77 @@ namespace Server.SignalRServer
                 {
                     byte[] lastBlock = new byte[slika.Length - offset];
                     System.Buffer.BlockCopy(slika, offset, lastBlock, 0, slika.Length - offset);
-                    Clients.Caller.PribaviMojeZahteveSlikaOdgovor(i, offset, slika.Length, true, lastBlock);
+                    BlokSlike noviBlokSlike = new BlokSlike();
+                    noviBlokSlike.blok = lastBlock;
+                    noviBlokSlike.jestePoslednji = true;
+                    noviBlokSlike.oglasIndex = i;
+                    noviBlokSlike.velicinaCeleSlike = slika.Length;
+                    noviBlokSlike.offset = offset;
+                    //Clients.Caller.PribaviMojeZahteveSlikaOdgovor(i, offset, slika.Length, true, lastBlock);
+                    outStaTrebaPoslatiKlijentu.slikeUDeloviva[i].Add(noviBlokSlike);
                 }
             }
 
-            // Vrati informacije o oglasima klijentu bez slika,
-            // Slike cemo naknadno poslati preko blokova
-            Clients.Caller.PribaviMojeZahteveOdgovor(resultString);
+            outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo = 0;
+            outStaTrebaPoslatiKlijentu.kojiDeoSlike = 0;
+            outStaTrebaPoslatiKlijentu.oglasiData = resultString;
+
+            // Sada mozemo poslati klijentu nazad prvi deo prve slike
+            if (outStaTrebaPoslatiKlijentu.oglasiData == "")
+            {
+                // nema sta da saljemo nazad
+                StaTrebaPoslatiKlijentu garbageStaTrebaPoslatiKlijentu;
+                connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryRemove(Context.ConnectionId, out garbageStaTrebaPoslatiKlijentu);
+                Clients.Caller.NistaNijeNadjeno("nista");
+                return;
+            }
+
+            Clients.Caller.PribaviMojeZahteveSlikaOdgovor(outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].offset,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].velicinaCeleSlike,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].jestePoslednji,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].blok);
+        }
+
+        // Pozivom ove funkcije nam klijent odgovara da je primio poruku
+        public void PribaviMojeZahteveSlikaOdgovorPrimljen(string nista)
+        {
+            StaTrebaPoslatiKlijentu outStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryGetValue(Context.ConnectionId, out outStaTrebaPoslatiKlijentu);
+            if (outStaTrebaPoslatiKlijentu == null)
+            {
+                return;
+            }
+
+            outStaTrebaPoslatiKlijentu.kojiDeoSlike++;
+            if (outStaTrebaPoslatiKlijentu.kojiDeoSlike > (outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo].Count - 1))
+            {
+                outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo++;
+                outStaTrebaPoslatiKlijentu.kojiDeoSlike = 0;
+            }
+
+            if (outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo > (outStaTrebaPoslatiKlijentu.slikeUDeloviva.Count - 1))
+            {
+                // Ako smo poslali sve delove svih slika, onda mozemo da posaljemo oglasi data
+                Clients.Caller.PribaviMojeZahteveOdgovor(outStaTrebaPoslatiKlijentu.oglasiData);
+            }
+            else
+            {
+                // Ako ima jos blokova slika koje treba poslati onda ovde saljemo naredni
+                Clients.Caller.PribaviMojeZahteveSlikaOdgovor(outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].offset,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].velicinaCeleSlike,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].jestePoslednji,
+                outStaTrebaPoslatiKlijentu.slikeUDeloviva[outStaTrebaPoslatiKlijentu.kojuSlikuSaljemo][outStaTrebaPoslatiKlijentu.kojiDeoSlike].blok);
+            }
+        }
+
+        // Pozivom ove funkcije nam klijent odgovara da je primio poruku
+        public void PribaviMojeZahteveOdgovorPrimljen(string nista)
+        {
+            // Ako je klijent primio sve mozemo ga izbrisati iz nasih zahteva
+            StaTrebaPoslatiKlijentu garbageStaTrebaPoslatiKlijentu;
+            connectedUserConnectionIdToStaTrebaPoslatiKlijentu.TryRemove(Context.ConnectionId, out garbageStaTrebaPoslatiKlijentu);
         }
     }
 }

@@ -68,6 +68,8 @@ namespace Client
             _hub.On("ZahtevUspesnoObrisan", x => ZahtevUspesnoObrisan(x));
             _hub.On("PribaviMojeZahteveOdgovor", x => PribaviMojeZahteveOdgovor(x));
             _hub.On<int, int, int, bool, byte[]>("PribaviMojeZahteveSlikaOdgovor", (x, y, z, w, t) => PribaviMojeZahteveSlikaOdgovor(x, y, z, w, t));
+            _hub.On("NistaNijeNadjeno", x => NistaNijeNadjeno(x));
+            _hub.On("NijeNadjenNijedanZahtev", x => NijeNadjenNijedanZahtev(x));
             InitializeComponent();
         }
 
@@ -372,6 +374,7 @@ namespace Client
             dateToDateTimePicker.BeginInvoke(action26);
             Action action27 = delegate ()
             {
+                dataGridView1.Rows.Clear();
                 dataGridView1.Visible = false;
             };
             dataGridView1.BeginInvoke(action27);
@@ -538,6 +541,8 @@ namespace Client
             {
                 _mojiOglasiForm.AzurirajDataGridView(_mojiOglasi);
             }
+
+            _hub.Invoke("PribaviMojeOglaseOdgovorPrimljen", "nista");
         }
 
         private void PribaviMojeOglaseSlikaOdgovor(int indexOglasa, int offsetBloka, int velicinaSlikeBytes, bool jestePoslednjiBlok, byte[] blok)
@@ -567,6 +572,8 @@ namespace Client
             {
                 _mojiOglasiForm.AzurirajDataGridViewSliku(_mojiOglasi, indexOglasa);
             }
+
+            _hub.Invoke("PribaviMojeOglaseSlikaOdgovorPrimljen", "nista");
         }
 
         private void pretraziButton_Click(object sender, EventArgs e)
@@ -598,10 +605,10 @@ namespace Client
                 dateToDateTimePicker.Value.Day);
         }
 
+        
+        // Ova funkcija ce biti pozvana nakon sto primimo sliku od servera
         private void PretraziOglaseOdgovor(string data)
         {
-            // Raspakovanje informacija
-            _searchOglasi.Clear();
             string[] oglasiStrings = data.Split('%');
             foreach (string oglasString in oglasiStrings)
             {
@@ -612,15 +619,6 @@ namespace Client
                 string[] oglasData = oglasString.Split('@');
                 int oglasIndex;
                 Int32.TryParse(oglasData[0], out oglasIndex);
-
-                if ((oglasIndex + 1) > _searchOglasi.Count)
-                {
-                    int trenutanCount = (oglasIndex + 1) - _searchOglasi.Count;
-                    for (int i = 0; i < trenutanCount; i++)
-                    {
-                        _searchOglasi.Add(new Oglas());
-                    }
-                }
 
                 _searchOglasi[oglasIndex].slikaReceivedNumberOfBytes = 0;
                 _searchOglasi[oglasIndex].adresa = oglasData[1];
@@ -633,7 +631,8 @@ namespace Client
                 Int32.TryParse(oglasData[8], out _searchOglasi[oglasIndex].id);
             }
 
-            Action action = delegate () {
+            Action action = delegate ()
+            {
 
                 int counter = 0;
                 for (int i = (_searchOglasi.Count - 1); i >= 0; i--)
@@ -652,14 +651,17 @@ namespace Client
                     dataGridView1.RowTemplate.MinimumHeight = 256;
                     dataGridView1.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
 
-
                     dataGridView1.Rows[i].Cells[0].Value = imageList1.Images[i];
                     counter++;
                 }
             };
 
             dataGridView1.BeginInvoke(action);
+
+            _hub.Invoke("PretraziOglaseOdgovorPrimljen", "nista");
         }
+
+
 
         private void PretraziOglaseSlikaOdgovor(int indexOglasa, int offsetBloka, int velicinaSlikeBytes, bool jestePoslednjiBlok, byte[] blok)
         {
@@ -670,6 +672,9 @@ namespace Client
                 for (int i = 0; i < trenutanCount; i++)
                 {
                     _searchOglasi.Add(new Oglas());
+                    _searchOglasi[_searchOglasi.Count - 1].slikaPrimljena = false;
+                    _searchOglasi[_searchOglasi.Count - 1].oglasPrimljen = false;
+                    _searchOglasi[_searchOglasi.Count - 1].slika = new byte[velicinaSlikeBytes];
                     Action action2 = delegate ()
                     {
                         dataGridView1.Rows.Add();
@@ -678,11 +683,6 @@ namespace Client
                 }
             }
 
-            // Ako je ovo prvi blok koji je stigao, treba alocirati mesto na klijentu za celu sliku
-            if (_searchOglasi[indexOglasa].slika == null)
-            {
-                _searchOglasi[indexOglasa].slika = new byte[velicinaSlikeBytes];
-            }
 
             // Iskopirati blok
             System.Buffer.BlockCopy(blok, 0, _searchOglasi[indexOglasa].slika, offsetBloka, blok.Length);
@@ -690,7 +690,10 @@ namespace Client
             // Ako je ovo bio poslednji blok onda mozemo da prikazemo sliku
             if (jestePoslednjiBlok)
             {
-                Action action = delegate () {
+                _searchOglasi[indexOglasa].slikaPrimljena = true;
+
+                Action action = delegate ()
+                {
                     Bitmap bmp;
                     using (var ms = new MemoryStream(_searchOglasi[indexOglasa].slika))
                     {
@@ -703,6 +706,14 @@ namespace Client
 
                 dataGridView1.BeginInvoke(action);
             }
+
+            _hub.Invoke("PretraziOglaseSlikaOdgovorPrimljen", "nista");
+        }
+
+
+        private void NistaNijeNadjeno(string nista)
+        {
+            MessageBox.Show("Nije pronadjen ni jedan oglas koji zadovaljava vase kriterijume");
         }
 
         private void OglasUspednoPostavljen(string nista)
@@ -839,6 +850,8 @@ namespace Client
             {
                 _mojiZahteviForm.AzurirajDataGridView(_mojiZahtevi);
             }
+
+            _hub.Invoke("PribaviMojeZahteveOdgovorPrimljen", "nista");
         }
 
         private void PribaviMojeZahteveSlikaOdgovor(int indexOglasa, int offsetBloka, int velicinaSlikeBytes, bool jestePoslednjiBlok, byte[] blok)
@@ -868,6 +881,13 @@ namespace Client
             {
                 _mojiZahteviForm.AzurirajDataGridViewSliku(_mojiZahtevi, indexOglasa);
             }
+
+            _hub.Invoke("PribaviMojeZahteveSlikaOdgovorPrimljen", "nista");
+        }
+
+        private void NijeNadjenNijedanZahtev(string nista)
+        {
+            MessageBox.Show("Nemate vise zahteva, ili oglasi vise nisu aktivni");
         }
 
         private void loggoutButton_Click(object sender, EventArgs e)

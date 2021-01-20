@@ -31,7 +31,7 @@ namespace Client
         // Za svaki oglas undo lista zahteva tohg oglasa
         public List<List<List<Zahtev>>> _undoZahtevi;
 
-        public int _selectedOglasIndex;
+        public int _selectedOglasIndex = -1;
 
         public MojiOglasi()
         {
@@ -272,6 +272,11 @@ namespace Client
 
         private void IscrtajDatumeOgalsa()
         {
+            if (_selectedOglasIndex == -1)
+            {
+                return;
+            }
+
             for (int i = 0; i < _undoOglasiDatumi.Count; i++)
             {
                 string datumiString = "";

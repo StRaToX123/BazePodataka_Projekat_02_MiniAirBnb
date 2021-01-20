@@ -20,7 +20,7 @@ namespace Client
         public IHubProxy _hub;
 
         private List<Oglas> _mojiOglasi = new List<Oglas>();
-        private int _selectedOglasIndex;
+        private int _selectedOglasIndex = -1;
 
         public MojiZahtevi()
         {
